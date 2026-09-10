@@ -1,3 +1,10 @@
+# Sync this fork with upstream, then re-apply fork-only container workflows.
+#
+# `gh repo sync --force` resets master to upstream, which would otherwise:
+#   - delete build.yml / sync-fork.yml
+#   - restore ci.yml / release.yml / stealth.yml
+# So we stash the fork workflows, sync, restore them, and drop upstream CI.
+
 name: Sync Fork
 
 on:
@@ -8,14 +15,64 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
 
     steps:
-      - name: Sync with upstream
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sync upstream and restore fork workflows
+        id: sync
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh repo sync "${{ github.repository }}" -b master
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          mkdir -p /tmp/fork-workflows
+          cp .github/workflows/build.yml /tmp/fork-workflows/
+          cp .github/workflows/sync-fork.yml /tmp/fork-workflows/
+          BEFORE="$(git rev-parse HEAD)"
+
+          gh repo sync "${{ github.repository }}" -b master --force
+
+          git fetch origin master
+          git reset --hard origin/master
+
+          if git diff --quiet "${BEFORE}" HEAD -- . ':(exclude).github/workflows'; then
+            echo "content_changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "content_changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          mkdir -p .github/workflows
+          cp /tmp/fork-workflows/build.yml .github/workflows/build.yml
+          cp /tmp/fork-workflows/sync-fork.yml .github/workflows/sync-fork.yml
+          rm -f \
+            .github/workflows/ci.yml \
+            .github/workflows/release.yml \
+            .github/workflows/stealth.yml
+
+          git add -A .github/workflows
+          if git diff --staged --quiet; then
+            echo "No workflow changes to commit"
+          else
+            git commit -m "chore: keep fork container workflows after upstream sync"
+            git push origin HEAD:master
+          fi
+
+      - name: Trigger image build
+        if: steps.sync.outputs.content_changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run build.yml --ref master

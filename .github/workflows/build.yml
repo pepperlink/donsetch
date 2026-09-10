@@ -1,12 +1,16 @@
-name: Build and Push Multi-Arch Image
+# Build and push the Docker image to GHCR.
+#
+# Version comes from Cargo.toml so tags stay in lockstep with upstream
+# after sync-fork merges their releases. This fork exists only to ship
+# the container — no CI / release / stealth jobs.
+
+name: Build and Push Image
 
 on:
   workflow_dispatch:
   push:
     branches:
-      - main
-    tags:
-      - 'v*'
+      - master
 
 env:
   REGISTRY: ghcr.io
@@ -15,6 +19,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     permissions:
       contents: read
       packages: write
@@ -23,16 +28,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Resolve version
+      - name: Resolve version from Cargo.toml
         id: version
         run: |
           set -euo pipefail
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF_NAME#v}"
-          else
-            VERSION="$(sed -n 's/^__version__ = "\([^"]*\)".*/\1/p' app/__init__.py)"
+          VERSION="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -n1)"
+          if [[ -z "${VERSION}" ]]; then
+            echo "Could not read package version from Cargo.toml" >&2
+            exit 1
           fi
-          IFS=. read -r MAJOR MINOR PATCH <<< "${VERSION}"
+          IFS=. read -r MAJOR MINOR _ <<< "${VERSION}"
           {
             echo "version=${VERSION}"
             echo "major=${MAJOR}"
@@ -55,7 +60,6 @@ jobs:
         with:
           context: .
           platforms: linux/amd64
-          # platforms: linux/amd64,linux/arm64
           push: true
           # Attestations show up as extra package versions in GHCR with the same digest.
           provenance: false
@@ -67,6 +71,7 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           labels: |
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
-            org.opencontainers.image.title=forage
+            org.opencontainers.image.title=donsetch
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
